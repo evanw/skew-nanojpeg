@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+
+body {
+  font: 14px sans-serif;
+  margin: 30px;
+}
+
+p, canvas {
+  margin: 15px 0;
+}
+
+canvas {
+  max-width: 200px;
+  max-height: 200px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.25);
+}
+
+</style>
+<title>JavaScript JPEG Parser Demo</title>
+</head>
+<body>
+<h1>JavaScript JPEG Parser Demo</h1>
+<p>
+  This is a demo of <a href="https://github.com/evanw/skew-nanojpeg">my port</a> of the <a href="http://keyj.emphy.de/nanojpeg/">NanoJPEG</a> library.
+  The compiled library (<a href="nanojpeg.js">nanojpeg.js</a>) is under 10kb.
+</p>
+<p>
+  Drag and drop JPEG files here to parse them...
+</p>
+<div id="debug"></div>
+<script src="nanojpeg.js"></script>
+<script>
+
+(function() {
+
+var debug = document.getElementById('debug');
+
+function log(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  debug.insertBefore(div, debug.firstChild);
+}
+
+function loadFile(name, encoded) {
+  var decoded = decodeJPEG(encoded);
+
+  if (decoded === null) {
+    log(name + ': loading failed');
+    return;
+  }
+
+  var canvas = document.createElement('canvas');
+  var context = canvas.getContext('2d');
+  var imageData = context.createImageData(decoded.width, decoded.height);
+  canvas.width = decoded.width;
+  canvas.height = decoded.height;
+
+  for (var i = 0; i < decoded.width * decoded.height; i++) {
+    imageData.data[i * 4] = decoded.rgb[i * 3];
+    imageData.data[i * 4 + 1] = decoded.rgb[i * 3 + 1];
+    imageData.data[i * 4 + 2] = decoded.rgb[i * 3 + 2];
+    imageData.data[i * 4 + 3] = 255;
+  }
+
+  context.putImageData(imageData, 0, 0);
+  debug.insertBefore(canvas, debug.firstChild);
+  log(name + ': loading succeeded');
+}
+
+document.ondragenter = function(e) {
+  e.preventDefault();
+};
+
+document.ondragover = function(e) {
+  e.preventDefault();
+};
+
+document.ondrop = function(e) {
+  e.preventDefault();
+
+  Array.prototype.forEach.call(e.dataTransfer.files, function(file) {
+    var reader = new FileReader;
+    reader.onload = function() {
+      loadFile(file.name, new Uint8Array(reader.result));
+    };
+    reader.readAsArrayBuffer(file);
+  });
+};
+
+})();
+
+</script>
+</body>
+</html>

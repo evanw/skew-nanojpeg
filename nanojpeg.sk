@@ -1,0 +1,1017 @@
+# NanoJPEG -- KeyJ's Tiny Baseline JPEG Decoder (http://keyj.emphy.de/nanojpeg/)
+# version 1.3 (2012-03-05)
+# by Martin J. Fiedler <martin.fiedler@gmx.net>
+#
+# NanoJPEG -- KeyJ's Tiny Baseline JPEG Decoder, Skew Port with EXIF Orientation
+# version 1.3 (2015-10-12)
+# By Evan Wallace <evan.exe@gmail.com>
+#
+# This software is published under the terms of KeyJ's Research License,
+# version 0.2. Usage of this software is subject to the following conditions:
+# 0. There's no warranty whatsoever. The author(s) of this software can not
+#    be held liable for any damages that occur when using this software.
+# 1. This software may be used freely for both non-commercial and commercial
+#    purposes.
+# 2. This software may be redistributed freely as long as no fees are charged
+#    for the distribution and this license information is included.
+# 3. This software may be modified freely except for this license information,
+#    which must not be changed in any way.
+# 4. If anything other than configuration, indentation or comments have been
+#    altered in the code, the original author(s) must receive a copy of the
+#    modified code.
+
+namespace NanoJPEG {
+  # Result codes for decode()
+  enum Result {
+    OK            # no error, decoding successful
+    NO_JPEG       # not a JPEG file
+    UNSUPPORTED   # unsupported format
+    SYNTAX_ERROR  # syntax error
+    FINISHED      # used internally, will never be reported
+  }
+
+  class Component {
+    var id = 0
+    var ssx = 0
+    var ssy = 0
+    var width = 0
+    var height = 0
+    var stride = 0
+    var quantizationTableIndex = 0
+    var acTableIndex = 0
+    var dcTableIndex = 0
+    var dcPred = 0
+    var pixels Uint8Array = null
+
+    def upsampleH {
+      var xmax = width - 3
+      var lin = 0
+      var lout = 0
+      var outv = Uint8Array.new(width * height * 2)
+
+      for y = height; y != 0; --y {
+        outv[lout] = _CF(_CF2A * pixels[lin] + _CF2B * pixels[lin + 1])
+        outv[lout + 1] = _CF(_CF3X * pixels[lin] + _CF3Y * pixels[lin + 1] + _CF3Z * pixels[lin + 2])
+        outv[lout + 2] = _CF(_CF3A * pixels[lin] + _CF3B * pixels[lin + 1] + _CF3C * pixels[lin + 2])
+
+        for x = 0; x < xmax; ++x {
+          outv[lout + x * 2 + 3] = _CF(_CF4A * pixels[lin + x] + _CF4B * pixels[lin + x + 1] + _CF4C * pixels[lin + x + 2] + _CF4D * pixels[lin + x + 3])
+          outv[lout + x * 2 + 4] = _CF(_CF4D * pixels[lin + x] + _CF4C * pixels[lin + x + 1] + _CF4B * pixels[lin + x + 2] + _CF4A * pixels[lin + x + 3])
+        }
+
+        lin += stride
+        lout += width * 2
+        outv[lout + -3] = _CF(_CF3A * pixels[lin - 1] + _CF3B * pixels[lin - 2] + _CF3C * pixels[lin - 3])
+        outv[lout + -2] = _CF(_CF3X * pixels[lin - 1] + _CF3Y * pixels[lin - 2] + _CF3Z * pixels[lin - 3])
+        outv[lout + -1] = _CF(_CF2A * pixels[lin - 1] + _CF2B * pixels[lin - 2])
+      }
+
+      width <<= 1
+      stride = width
+      pixels = outv
+    }
+
+    def upsampleV {
+      var w = width
+      var s1 = stride
+      var s2 = s1 + s1
+      var outv = Uint8Array.new(width * height * 2)
+
+      for x = 0; x < w; ++x {
+        var cin = x
+        var cout = x
+
+        outv[cout] = _CF(_CF2A * pixels[cin] + _CF2B * pixels[cin + s1])
+        cout += w
+        outv[cout] = _CF(_CF3X * pixels[cin] + _CF3Y * pixels[cin + s1] + _CF3Z * pixels[cin + s2])
+        cout += w
+        outv[cout] = _CF(_CF3A * pixels[cin] + _CF3B * pixels[cin + s1] + _CF3C * pixels[cin + s2])
+        cout += w
+        cin += s1
+
+        for y = height - 3; y != 0; --y {
+          outv[cout] = _CF(_CF4A * pixels[cin + -s1] + _CF4B * pixels[cin] + _CF4C * pixels[cin + s1] + _CF4D * pixels[cin + s2])
+          cout += w
+          outv[cout] = _CF(_CF4D * pixels[cin + -s1] + _CF4C * pixels[cin] + _CF4B * pixels[cin + s1] + _CF4A * pixels[cin + s2])
+          cout += w
+          cin += s1
+        }
+
+        cin += s1
+        outv[cout] = _CF(_CF3A * pixels[cin] + _CF3B * pixels[cin - s1] + _CF3C * pixels[cin - s2])
+        cout += w
+        outv[cout] = _CF(_CF3X * pixels[cin] + _CF3Y * pixels[cin - s1] + _CF3Z * pixels[cin - s2])
+        cout += w
+        outv[cout] = _CF(_CF2A * pixels[cin] + _CF2B * pixels[cin - s1])
+      }
+
+      height <<= 1
+      stride = width
+      pixels = outv
+    }
+  }
+
+  class Stop {
+  }
+
+  const _zigZagTable = [
+    0,  1,  8,  16, 9,  2,  3,  10,
+    17, 24, 32, 25, 18, 11, 4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13, 6,  7,  14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63
+  ]
+
+  def _clip(x int) int {
+    return x < 0 ? 0 : x > 0xFF ? 0xFF : x
+  }
+
+  def _CF(x int) int {
+    return _clip((x + 64) >> 7)
+  }
+
+  def _rowInverseDCT(block Int32Array, coefficient int) {
+    var x0 int
+    var x1 = block[coefficient + 4] << 11
+    var x2 = block[coefficient + 6]
+    var x3 = block[coefficient + 2]
+    var x4 = block[coefficient + 1]
+    var x5 = block[coefficient + 7]
+    var x6 = block[coefficient + 5]
+    var x7 = block[coefficient + 3]
+    var x8 int
+
+    if (x1 | x2 | x3 | x4 | x5 | x6 | x7) == 0 {
+      var repeat = block[coefficient] << 3
+      block[coefficient] = repeat
+      block[coefficient + 1] = repeat
+      block[coefficient + 2] = repeat
+      block[coefficient + 3] = repeat
+      block[coefficient + 4] = repeat
+      block[coefficient + 5] = repeat
+      block[coefficient + 6] = repeat
+      block[coefficient + 7] = repeat
+      return
+    }
+
+    x0 = (block[coefficient] << 11) + 128
+    x8 = _W7 * (x4 + x5)
+    x4 = x8 + (_W1 - _W7) * x4
+    x5 = x8 - (_W1 + _W7) * x5
+    x8 = _W3 * (x6 + x7)
+    x6 = x8 - (_W3 - _W5) * x6
+    x7 = x8 - (_W3 + _W5) * x7
+    x8 = x0 + x1
+    x0 -= x1
+    x1 = _W6 * (x3 + x2)
+    x2 = x1 - (_W2 + _W6) * x2
+    x3 = x1 + (_W2 - _W6) * x3
+    x1 = x4 + x6
+    x4 -= x6
+    x6 = x5 + x7
+    x5 -= x7
+    x7 = x8 + x3
+    x8 -= x3
+    x3 = x0 + x2
+    x0 -= x2
+    x2 = (181 * (x4 + x5) + 128) >> 8
+    x4 = (181 * (x4 - x5) + 128) >> 8
+
+    block[coefficient] = (x7 + x1) >> 8
+    block[coefficient + 1] = (x3 + x2) >> 8
+    block[coefficient + 2] = (x0 + x4) >> 8
+    block[coefficient + 3] = (x8 + x6) >> 8
+    block[coefficient + 4] = (x8 - x6) >> 8
+    block[coefficient + 5] = (x0 - x4) >> 8
+    block[coefficient + 6] = (x3 - x2) >> 8
+    block[coefficient + 7] = (x7 - x1) >> 8
+  }
+
+  def _colInverseDCT(block Int32Array, coefficient int, pixels Uint8Array, outv int, stride int) {
+    var x0 int
+    var x1 = block[coefficient + 8 * 4] << 8
+    var x2 = block[coefficient + 8 * 6]
+    var x3 = block[coefficient + 8 * 2]
+    var x4 = block[coefficient + 8 * 1]
+    var x5 = block[coefficient + 8 * 7]
+    var x6 = block[coefficient + 8 * 5]
+    var x7 = block[coefficient + 8 * 3]
+    var x8 int
+
+    if (x1 | x2 | x3 | x4 | x5 | x6 | x7) == 0 {
+      var repeat = _clip(((block[coefficient] + 32) >> 6) + 128)
+      for i = 8; i != 0; --i {
+        pixels[outv] = repeat
+        outv += stride
+      }
+      return
+    }
+
+    x0 = (block[coefficient] << 8) + 8192
+    x8 = _W7 * (x4 + x5) + 4
+    x4 = (x8 + (_W1 - _W7) * x4) >> 3
+    x5 = (x8 - (_W1 + _W7) * x5) >> 3
+    x8 = _W3 * (x6 + x7) + 4
+    x6 = (x8 - (_W3 - _W5) * x6) >> 3
+    x7 = (x8 - (_W3 + _W5) * x7) >> 3
+    x8 = x0 + x1
+    x0 -= x1
+    x1 = _W6 * (x3 + x2) + 4
+    x2 = (x1 - (_W2 + _W6) * x2) >> 3
+    x3 = (x1 + (_W2 - _W6) * x3) >> 3
+    x1 = x4 + x6
+    x4 -= x6
+    x6 = x5 + x7
+    x5 -= x7
+    x7 = x8 + x3
+    x8 -= x3
+    x3 = x0 + x2
+    x0 -= x2
+    x2 = (181 * (x4 + x5) + 128) >> 8
+    x4 = (181 * (x4 - x5) + 128) >> 8
+
+    pixels[outv] = _clip(((x7 + x1) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x3 + x2) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x0 + x4) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x8 + x6) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x8 - x6) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x0 - x4) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x3 - x2) >> 14) + 128)
+    outv += stride
+    pixels[outv] = _clip(((x7 - x1) >> 14) + 128)
+  }
+
+  const _W1 = 2841
+  const _W2 = 2676
+  const _W3 = 2408
+  const _W5 = 1609
+  const _W6 = 1108
+  const _W7 = 565
+
+  const _CF4A = -9
+  const _CF4B = 111
+  const _CF4C = 29
+  const _CF4D = -3
+  const _CF3A = 28
+  const _CF3B = 109
+  const _CF3C = -9
+  const _CF3X = 104
+  const _CF3Y = 27
+  const _CF3Z = -3
+  const _CF2A = 139
+  const _CF2B = -11
+
+  enum Orientation {
+    NONE
+    ROTATE_0
+    FLIP_ROTATE_0
+    ROTATE_180
+    FLIP_ROTATE_180
+    FLIP_ROTATE_90
+    ROTATE_90
+    FLIP_ROTATE_270
+    ROTATE_270
+  }
+
+  class Decoder {
+    var _bitBuffer = 0
+    var _bitCount = 0
+    var _block = Int32Array.new(64)
+    var _bytes Uint8Array = null
+    var _componentCount = 0
+    var _components List<Component> = []
+    var _error = Result.OK
+    var _exifOrientation = Orientation.ROTATE_0
+    var _height = 0
+    var _heightInMacroBlocks = 0
+    var _huffmanTable List<Uint16Array> = []
+    var _length = 0
+    var _macroBlockSizeX = 0
+    var _macroBlockSizeY = 0
+    var _offset = 0
+    var _quantizationTable List<Uint8Array> = []
+    var _restartInterval = 0
+    var _rgb Uint8Array = null
+    var _size = 0
+    var _width = 0
+    var _widthInMacroBlocks = 0
+
+    def new {
+      for i = 0; i < 4; i++ {
+        _quantizationTable.append(Uint8Array.new(64))
+        _huffmanTable.append(Uint16Array.new(65536))
+        _components.append(Component.new)
+      }
+    }
+
+    def _throw(e Result) {
+      _error = e
+      throw Stop.new
+    }
+
+    def _showBits(bits int) int {
+      if bits == 0 {
+        return 0
+      }
+
+      while _bitCount < bits {
+        if _size <= 0 {
+          _bitBuffer = (_bitBuffer << 8) | 0xFF
+          _bitCount += 8
+          continue
+        }
+
+        var newbyte = _bytes[_offset]
+        _offset++
+        _size--
+        _bitCount += 8
+        _bitBuffer = (_bitBuffer << 8) | newbyte
+
+        # Handler markers midstream
+        if newbyte == 0xFF {
+          if _size == 0 {
+            _throw(.SYNTAX_ERROR)
+          }
+
+          var marker = _bytes[_offset]
+          _offset++
+          _size--
+
+          # Check for an end of image marker
+          if marker == 0xD9 {
+            _size = 0
+          } else if marker != 0x00 && marker != 0xFF {
+            if (marker & 0xF8) != 0xD0 {
+              _throw(.SYNTAX_ERROR)
+            }
+            _bitBuffer = (_bitBuffer << 8) | marker
+            _bitCount += 8
+          }
+        }
+      }
+
+      return (_bitBuffer >> (_bitCount - bits)) & ((1 << bits) - 1)
+    }
+
+    def _skipBits(bits int) {
+      if _bitCount < bits {
+        _showBits(bits)
+      }
+      _bitCount -= bits
+    }
+
+     def _getBits(bits int) int {
+      var result = _showBits(bits)
+      _skipBits(bits)
+      return result
+    }
+
+    def _byteAlign {
+      _bitCount &= 0xF8
+    }
+
+    def _skip(count int) {
+      _offset += count
+      _size -= count
+      _length -= count
+
+      if _size < 0 {
+        _throw(.SYNTAX_ERROR)
+      }
+    }
+
+    def _decodeBig16(offset int) int {
+      return (_bytes[offset] << 8) | _bytes[offset + 1]
+    }
+
+    def _decodeBig32(offset int) int {
+      return (_bytes[offset] << 24) | (_bytes[offset + 1] << 16) | (_bytes[offset + 2] << 8) | _bytes[offset + 3]
+    }
+
+    enum Endianness {
+      BIG
+      LITTLE
+    }
+
+    def _decode16(offset int, endianness Endianness) int {
+      if endianness == .LITTLE {
+        return _bytes[offset] | (_bytes[offset + 1] << 8)
+      }
+      return _decodeBig16(offset)
+    }
+
+    def _decode32(offset int, endianness Endianness) int {
+      if endianness == .LITTLE {
+        return _bytes[offset] | (_bytes[offset + 1] << 8) | (_bytes[offset + 2] << 16) | (_bytes[offset + 3] << 24)
+      }
+      return _decodeBig32(offset)
+    }
+
+    def _decodeLength {
+      if _size < 2 {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      _length = _decodeBig16(_offset)
+
+      if _length > _size {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      _skip(2)
+    }
+
+    def _skipMarker {
+      _decodeLength
+      _skip(_length)
+    }
+
+    def _decodeSOF {
+      var ssxmax = 0
+      var ssymax = 0
+      var c Component
+
+      _decodeLength
+      if _length < 9 {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      if _bytes[_offset] != 8 {
+        _throw(.UNSUPPORTED)
+      }
+
+      _height = _decodeBig16(_offset + 1)
+      _width = _decodeBig16(_offset + 3)
+      _componentCount = _bytes[_offset + 5]
+      _skip(6)
+
+      if _componentCount != 1 && _componentCount != 3 {
+        _throw(.UNSUPPORTED)
+      }
+
+      if _length < _componentCount * 3 {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      for i = 0; i < _componentCount; ++i {
+        c = _components[i]
+        c.id = _bytes[_offset]
+        c.ssx = _bytes[_offset + 1] >> 4
+        c.ssy = _bytes[_offset + 1] & 15
+        c.quantizationTableIndex = _bytes[_offset + 2]
+
+        if c.ssx == 0 || c.ssy == 0 || (c.quantizationTableIndex & 0xFC) != 0 {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        if (c.ssx & (c.ssx - 1)) != 0 || (c.ssy & (c.ssy - 1)) != 0 {
+          _throw(.UNSUPPORTED)
+        }
+
+        _skip(3)
+
+        if c.ssx > ssxmax {
+          ssxmax = c.ssx
+        }
+
+        if c.ssy > ssymax {
+          ssymax = c.ssy
+        }
+      }
+
+      if _componentCount == 1 {
+        c = _components[0]
+        c.ssx = c.ssy = ssxmax = ssymax = 1
+      }
+
+      _macroBlockSizeX = ssxmax << 3
+      _macroBlockSizeY = ssymax << 3
+      _widthInMacroBlocks = (_width + _macroBlockSizeX - 1) / _macroBlockSizeX
+      _heightInMacroBlocks = (_height + _macroBlockSizeY - 1) / _macroBlockSizeY
+
+      for i = 0; i < _componentCount; ++i {
+        c = _components[i]
+        c.width = (_width * c.ssx + ssxmax - 1) / ssxmax
+        c.height = (_height * c.ssy + ssymax - 1) / ssymax
+        c.stride = _widthInMacroBlocks * _macroBlockSizeX * c.ssx / ssxmax
+
+        if c.width < 3 && c.ssx != ssxmax || c.height < 3 && c.ssy != ssymax {
+          _throw(.UNSUPPORTED)
+        }
+
+        c.pixels = Uint8Array.new(c.stride * (_heightInMacroBlocks * _macroBlockSizeY * c.ssy / ssymax))
+      }
+
+      _rgb = Uint8Array.new(_width * _height * 3)
+      _skip(_length)
+    }
+
+    def _decodeDHT {
+      _decodeLength
+      while _length >= 17 {
+        var i = _bytes[_offset]
+
+        if (i & 0xEC) != 0 {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        if (i & 0x02) != 0 {
+          _throw(.UNSUPPORTED)
+        }
+
+        i = (i | (i >> 3)) & 3 # combined DC/AC + tableid value
+        var counts = Uint8Array.new(16)
+        for codelen = 1; codelen <= 16; ++codelen {
+          counts[codelen - 1] = _bytes[_offset + codelen]
+        }
+        _skip(17)
+
+        var vlc = _huffmanTable[i]
+        var vlcc = 0
+        var remain = 65536
+        var spread = 65536
+        for codelen = 1; codelen <= 16; ++codelen {
+          spread >>= 1
+
+          var currcnt = counts[codelen - 1]
+          if currcnt == 0 {
+            continue
+          }
+
+          if _length < currcnt {
+            _throw(.SYNTAX_ERROR)
+          }
+
+          remain -= currcnt << (16 - codelen)
+          if remain < 0 {
+            _throw(.SYNTAX_ERROR)
+          }
+
+          for j = 0; j < currcnt; ++j {
+            var code = _bytes[_offset + j]
+            for k = spread; k != 0; --k {
+              if vlcc < 65536 {
+                vlc[vlcc] = codelen << 8 | code
+                vlcc++
+              }
+            }
+          }
+          _skip(currcnt)
+        }
+
+        while remain != 0 {
+          remain--
+          if vlcc < 65536 {
+            vlc[vlcc] = vlc[vlcc] & (0xFF << 8)
+            vlcc++
+          }
+        }
+      }
+
+      if _length != 0 {
+        _throw(.SYNTAX_ERROR)
+      }
+    }
+
+    def _decodeDQT {
+      _decodeLength
+      while _length >= 65 {
+        var i = _bytes[_offset]
+        if (i & 0xFC) != 0 {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        var t = _quantizationTable[i]
+        for j = 0; j < 64; ++j {
+          t[j] = _bytes[_offset + j + 1]
+        }
+        _skip(65)
+      }
+
+      if _length != 0 {
+        _throw(.SYNTAX_ERROR)
+      }
+    }
+
+    def _decodeDRI {
+      _decodeLength
+
+      if _length < 2 {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      _restartInterval = _decodeBig16(_offset)
+      _skip(_length)
+    }
+
+    var _getVLC_code = 0
+
+    def _getVLC(vlc Uint16Array) int {
+      var value = _showBits(16)
+      var bits = vlc[value] >> 8
+
+      if bits == 0 {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      _skipBits(bits)
+      value = vlc[value] & 0xFF
+      _getVLC_code = value
+
+      bits = value & 15
+      if bits == 0 {
+        return 0
+      }
+
+      value = _getBits(bits)
+      if value < (1 << (bits - 1)) {
+        value += (-1 << bits) + 1
+      }
+
+      return value
+    }
+
+    def _decodeBlock(c Component, outv int) {
+      var coefficient = 0
+      _block = Int32Array.new(64)
+      c.dcPred += _getVLC(_huffmanTable[c.dcTableIndex])
+      _block[0] = c.dcPred * _quantizationTable[c.quantizationTableIndex][0]
+
+      while coefficient < 63 {
+        var value = _getVLC(_huffmanTable[c.acTableIndex])
+        if _getVLC_code == 0 {
+          break # EOB
+        }
+
+        if (_getVLC_code & 0x0F) == 0 && (_getVLC_code != 0xF0) {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        coefficient += (_getVLC_code >> 4) + 1
+
+        if coefficient > 63 {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        _block[_zigZagTable[coefficient]] = value * _quantizationTable[c.quantizationTableIndex][coefficient]
+      }
+
+      for i = 0; i < 64; i += 8 {
+        _rowInverseDCT(_block, i)
+      }
+
+      for i = 0; i < 8; ++i {
+        _colInverseDCT(_block, i, c.pixels, outv + i, c.stride)
+      }
+    }
+
+    def _decodeScan {
+      var restartCount = _restartInterval
+      var nextRestart = 0
+      _decodeLength
+
+      if _length < 4 + 2 * _componentCount {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      if _bytes[_offset] != _componentCount {
+        _throw(.UNSUPPORTED)
+      }
+
+      _skip(1)
+      for i = 0; i < _componentCount; ++i {
+        var c = _components[i]
+
+        if _bytes[_offset] != c.id {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        if (_bytes[_offset + 1] & 0xEE) != 0 {
+          _throw(.SYNTAX_ERROR)
+        }
+
+        c.dcTableIndex = _bytes[_offset + 1] >> 4
+        c.acTableIndex = (_bytes[_offset + 1] & 1) | 2
+        _skip(2)
+      }
+
+      if _bytes[_offset] != 0 || (_bytes[_offset + 1] != 63) || _bytes[_offset + 2] != 0 {
+        _throw(.UNSUPPORTED)
+      }
+
+      _skip(_length)
+      for mby = 0; mby < _heightInMacroBlocks; mby++ {
+        for mbx = 0; mbx < _widthInMacroBlocks; mbx++ {
+          if (mbx != 0 || mby != 0) && _restartInterval != 0 {
+            --restartCount
+            if restartCount == 0 {
+              _byteAlign
+
+              var i = _getBits(16)
+              if (i & 0xFFF8) != 0xFFD0 || (i & 7) != nextRestart {
+                _throw(.SYNTAX_ERROR)
+              }
+
+              nextRestart = (nextRestart + 1) & 7
+              restartCount = _restartInterval
+
+              for j in 0..4 {
+                _components[j].dcPred = 0
+              }
+            }
+          }
+
+          for i = 0; i < _componentCount; ++i {
+            var c = _components[i]
+            for sby = 0; sby < c.ssy; ++sby {
+              for sbx = 0; sbx < c.ssx; ++sbx {
+                _decodeBlock(c, ((mby * c.ssy + sby) * c.stride + mbx * c.ssx + sbx) << 3)
+              }
+            }
+          }
+        }
+      }
+
+      _error = .FINISHED
+    }
+
+    def _decodeEXIF {
+      _decodeLength
+
+      if _length < 6 || _decodeBig32(_offset) != 0x45786966 || _decodeBig16(_offset + 4) != 0x0000 {
+        _skip(_length)
+        return
+      }
+
+      _skip(6)
+      var origin = _offset
+      if _length < 8 {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      # Check for TIFF Header (can be big endian or little endian)
+      var tiffHeader = _decodeBig32(origin)
+      var endianness Endianness = tiffHeader == 0x49492A00 ? .LITTLE : .BIG
+      if endianness == .BIG && tiffHeader != 0x4D4D002A {
+        _throw(.SYNTAX_ERROR)
+      }
+
+      # Only include what we need from the EXIF spec
+      const EXIF_TAG_ORIENTATION = 0x0112
+      const EXIF_FORMAT_BYTE = 1
+      const EXIF_FORMAT_SHORT = 3
+      const EXIF_FORMAT_LONG = 4
+      const EXIF_FORMAT_SLONG = 9
+
+      # Next is the offset to the first IFD
+      var start = origin + _decode32(origin + 4, endianness)
+      var count = _decode16(start, endianness)
+      start += 2
+      for i in 0..count {
+        var tag = _decode16(start, endianness)
+        var format = _decode16(start + 2, endianness)
+        var components = _decode32(start + 4, endianness)
+        start += 8
+        if tag == EXIF_TAG_ORIENTATION && components == 1 {
+          _exifOrientation = .NONE
+          if format == EXIF_FORMAT_BYTE {
+            _exifOrientation = _bytes[start] as Orientation
+          }
+          else if format == EXIF_FORMAT_SHORT {
+            _exifOrientation = _decode16(start, endianness) as Orientation
+          }
+          else if format == EXIF_FORMAT_LONG || format == EXIF_FORMAT_SLONG {
+            _exifOrientation = _decode32(start, endianness) as Orientation
+          }
+          if format < Orientation.ROTATE_0 || format > Orientation.ROTATE_270 {
+            _throw(.SYNTAX_ERROR)
+          }
+          break
+        }
+        start += 4
+      }
+
+      _skip(_length)
+    }
+
+    def _convert {
+      for i = 0; i < _componentCount; ++i {
+        var c = _components[i]
+        while c.width < _width || c.height < _height {
+          if c.width < _width { c.upsampleH }
+          if c.height < _height { c.upsampleV }
+        }
+      }
+
+      # Convert to RGB
+      var c0 = _components[0]
+      var rgb = _rgb
+
+      # Gray => RGB
+      if _componentCount == 1 {
+        var prgb = 0
+        var pg = 0
+
+        for y = _height; y != 0; --y {
+          for x = 0; x < _width; ++x {
+            var g = c0.pixels[pg + x]
+            rgb[prgb]     = g
+            rgb[prgb + 1] = g
+            rgb[prgb + 2] = g
+            prgb += 3
+          }
+
+          pg += c0.stride
+        }
+      }
+
+      # YCbCr => RGB
+      else {
+        assert(_componentCount == 3)
+
+        var c1 = _components[1]
+        var c2 = _components[2]
+        var prgb = 0
+        var py = 0
+        var pcb = 0
+        var pcr = 0
+
+        for yy = _height; yy != 0; --yy {
+          for x = 0; x < _width; ++x {
+            var y = c0.pixels[py + x] << 8
+            var cb = c1.pixels[pcb + x] - 128
+            var cr = c2.pixels[pcr + x] - 128
+
+            rgb[prgb]     = _clip((y + 359 * cr + 128) >> 8)
+            rgb[prgb + 1] = _clip((y - 88 * cb - 183 * cr + 128) >> 8)
+            rgb[prgb + 2] = _clip((y + 454 * cb + 128) >> 8)
+            prgb += 3
+          }
+
+          py += c0.stride
+          pcb += c1.stride
+          pcr += c2.stride
+        }
+      }
+    }
+
+    def _orient {
+      if _exifOrientation == .ROTATE_0 {
+        return
+      }
+
+      var oldWidth = _width
+      var oldHeight = _height
+      var transpose = _exifOrientation >= Orientation.FLIP_ROTATE_90
+      var newWidth = transpose ? oldHeight : oldWidth
+      var newHeight = transpose ? oldWidth : oldHeight
+      var input = _rgb
+      var output = Uint8Array.new(newWidth * newHeight * 3)
+
+      for y = 0, i = 0; y < oldHeight; y++ {
+        var o int
+        var inc int
+
+        switch _exifOrientation {
+          case .ROTATE_0 {
+            o = y * newWidth
+            inc = 1
+          }
+
+          case .FLIP_ROTATE_0 {
+            o = y * newWidth + newWidth - 1
+            inc = -1
+          }
+
+          case .ROTATE_180 {
+            o = (oldHeight - y - 1) * newWidth + newWidth - 1
+            inc = -1
+          }
+
+          case .FLIP_ROTATE_180 {
+            o = (oldHeight - y - 1) * newWidth
+            inc = 1
+          }
+
+          case .FLIP_ROTATE_90 {
+            o = y
+            inc = newWidth
+          }
+
+          case .ROTATE_90 {
+            o = oldHeight - y - 1
+            inc = newWidth
+          }
+
+          case .FLIP_ROTATE_270 {
+            o = oldHeight - y - 1 + newWidth * (newHeight - 1)
+            inc = -newWidth
+          }
+
+          case .ROTATE_270 {
+            o = y + newWidth * (newHeight - 1)
+            inc = -newWidth
+          }
+        }
+
+        o *= 3
+        inc *= 3
+
+        for x = 0; x < oldWidth; x++, i += 3 {
+          output[o]     = input[i]
+          output[o + 1] = input[i + 1]
+          output[o + 2] = input[i + 2]
+          o += inc
+        }
+      }
+
+      _width = newWidth
+      _height = newHeight
+      _rgb = output
+    }
+
+    def decode(jpeg Uint8Array) Result {
+      try {
+        _bytes = jpeg
+        _offset = 0
+        _size = jpeg.length
+
+        # Validate header
+        if _size < 2 || _bytes[0] != 0xFF || _bytes[1] != 0xD8 {
+          _throw(.NO_JPEG)
+        }
+        _skip(2)
+
+        while _error == .OK {
+          if _size < 2 || _bytes[_offset] != 0xFF {
+            _throw(.SYNTAX_ERROR)
+          }
+          _skip(2)
+
+          var value = _bytes[_offset - 1]
+          if value == 0xC0 { _decodeSOF }
+          else if value == 0xC4 { _decodeDHT }
+          else if value == 0xDB { _decodeDQT }
+          else if value == 0xDD { _decodeDRI }
+          else if value == 0xDA { _decodeScan }
+          else if value == 0xE1 { _decodeEXIF }
+          else if value == 0xFE { _skipMarker }
+          else if (value & 0xF0) == 0xE0 { _skipMarker }
+          else { _throw(.UNSUPPORTED) }
+        }
+
+        if _error != .FINISHED {
+          _error = .SYNTAX_ERROR
+        } else {
+          _convert
+          _orient
+          _error = .OK
+        }
+      } catch e Stop {
+      }
+
+      return _error
+    }
+
+    def width int {
+      return _width
+    }
+
+    def height int {
+      return _height
+    }
+
+    def rgb Uint8Array {
+      return _rgb
+    }
+  }
+}
+
+if NANO_JPEG_DEMO {
+  @entry
+  def main {
+    (dynamic.typeof(dynamic.exports) != "undefined" ? dynamic.exports : dynamic.this).decodeJPEG = (jpeg Uint8Array) dynamic => {
+      var decoder = NanoJPEG.Decoder.new
+      if decoder.decode(jpeg) != .OK {
+        return null
+      }
+      return {
+        "width": decoder.width,
+        "height": decoder.height,
+        "rgb": decoder.rgb,
+      }
+    }
+  }
+}
+
+# Pass "--define:NANO_JPEG_DEMO=true" to the compiler to export a JavaScript image decoding API
+const NANO_JPEG_DEMO = false
