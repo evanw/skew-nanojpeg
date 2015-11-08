@@ -11,6 +11,6 @@
     "build": "node_modules/.bin/skewc --target=js --release --define:NANO_JPEG_DEMO=true nanojpeg.sk typedarray.sk --output-file=nanojpeg.js"
   },
   "devDependencies": {
-    "skew": "0.5.33"
+    "skew": "0.5.48"
   }
 }
