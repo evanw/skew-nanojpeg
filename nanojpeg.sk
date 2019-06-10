@@ -792,7 +792,7 @@ namespace NanoJPEG {
           else if format == EXIF_FORMAT_LONG || format == EXIF_FORMAT_SLONG {
             _exifOrientation = _decode32(start, endianness) as Orientation
           }
-          if format < Orientation.ROTATE_0 || format > Orientation.ROTATE_270 {
+          if _exifOrientation < Orientation.ROTATE_0 || _exifOrientation > Orientation.ROTATE_270 {
             _throw(.SYNTAX_ERROR)
           }
           break
